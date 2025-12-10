@@ -1,6 +1,6 @@
 {
   "known": {
-    "README.md": "4e91a80b70a1a04fe2ece125a097b0f9",
+    "README.md": "108e6aa045e7871a4b93cc04716dbef3",
     "apps/autorecorder/condition_engine.c": "96b71f8c0c2c81d42b8cb7db26ab2e70",
     "apps/autorecorder/condition_stubs.c": "950d94ba641b5b4746898772adc7bf91",
     "apps/autorecorder/e2pat_writer.c": "0c0d30e66f6f3755b62afa5efb3e4483",
@@ -73,5 +73,5 @@
     ".gpt_sync_state.json": "77a03b1263cf0afac3296409e0628bbc"
   },
   "had_tracked_files": true,
-  "last_push": null
+  "last_push": "2025-12-10T15:08:46.696237"
 }
