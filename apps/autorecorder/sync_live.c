@@ -1,6 +1,7 @@
 #include "sync_live.h"
 #include "ft_api.h"
 
+/* EINZIGE Definition von g_live */
 live_sync_state_t g_live;
 
 void live_sync_init(void)

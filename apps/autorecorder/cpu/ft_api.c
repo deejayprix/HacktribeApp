@@ -22,8 +22,8 @@ static void (*fw_write_step)(const ft_step_t*)     = 0;
 static int  (*fw_get_step_count)(void)             = 0;
 static void (*fw_print)(const char *fmt, ...)      = 0;
 
-/* FW-globaler Livesync Zustand */
-live_sync_state_t g_live;
+/* g_live darf NICHT hier definiert werden → wird in sync_live.c definiert */
+extern live_sync_state_t g_live;
 
 /* -------------------------------------------------------------
    INIT – muss beim Start aufgerufen werden
@@ -50,7 +50,6 @@ int ft_write_step(const ft_step_t *s)
         return 1;
     }
 
-    /* Kein Fallback in ft_api.c → App entscheidet darüber */
     return 0;
 }
 
@@ -62,7 +61,7 @@ int ft_get_pattern_step_count(void)
     if (fw_get_step_count)
         return fw_get_step_count();
 
-    return 64; /* Fallback: Electribe Default */
+    return 64; /* Electribe Default */
 }
 
 /* -------------------------------------------------------------
@@ -92,3 +91,22 @@ uint32_t ft_get_ticks(void)
     return syscall_get_ticks();
 }
 
+/* -------------------------------------------------------------
+   FEHLENDE API FUNKTIONEN FÜR sync_live.c
+   ------------------------------------------------------------- */
+
+int ft_get_current_pattern(void)
+{
+    return g_live.pattern;
+}
+
+int ft_get_play_position(void)
+{
+    return g_live.step;
+}
+
+int ft_get_bpm(void)
+{
+    /* Default Fallback → kann später durch echten FW-Call ersetzt werden */
+    return 120;
+}
