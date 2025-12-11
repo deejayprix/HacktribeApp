@@ -1,6 +1,0 @@
-*** Begin Patch
-*** Update File: apps/autorecorder/randomizer.c
-@@
- #include "euclid_engine_v2.h"
-+#include <string.h> /* memcpy */
-*** End Patch
