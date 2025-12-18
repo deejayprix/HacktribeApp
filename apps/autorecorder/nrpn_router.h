@@ -4,21 +4,35 @@
 #include <stdint.h>
 
 /*
- * NRPN router entry point.
- * Call this for every received NRPN message:
+ * NRPN Router – Transaction-safe
  *
- *   msb = NRPN MSB (CC#99 value)
- *   lsb = NRPN LSB (CC#98 value)
- *   value = data entry MSB (CC#6 value)
+ * Unterstützt 2 Aufrufarten (ohne API-Sprung):
+ *
+ *  A) CC-Stream (empfohlen, DAW: CC99/CC98/CC6 (+CC38)):
+ *     nrpn_handle(channel, cc, value)
+ *     → erkennt automatisch CC99/98/6/38 und verwaltet Transaction-State.
+ *
+ *  B) Direkt (bereits dekodiertes NRPN):
+ *     nrpn_handle(msb, lsb, value)
+ *     → wenn "cc" NICHT 99/98/6/38 ist, wird es als (msb,lsb,value) interpretiert.
+ *
+ * Fail-safe:
+ *  - unvollständige Sequenzen werden verworfen (Timeout)
+ *  - keine halben Commits
  */
-void nrpn_handle(int msb, int lsb, int value);
 
-/*
- * Optional explicit handler for MSB=50 (Live FX, Motion, Mods, Conditions)
- * Called automatically inside nrpn_handle().
- */
-void nrpn_handle_msb50(int lsb, int value);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Polymorpher Entry: siehe Kommentar oben */
+void nrpn_handle(int a, int b, int c);
+
+/* Optional tick hook (z.B. 1x pro Frame), um Timeouts abzuräumen */
 void nrpn_router_tick(void);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* NRPN_ROUTER_H */

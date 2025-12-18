@@ -25,6 +25,10 @@ int ft_get_current_bar(void);
 int ft_get_pattern_step_count(void);
 int ft_get_bpm(void);
 
+/* -------------------------------------------------------------
+   Ticks (ms) – used for NRPN timeout/transactions
+   ------------------------------------------------------------- */
+uint32_t ft_get_ticks(void);
 
 /* -------------------------------------------------------------
    Initialization

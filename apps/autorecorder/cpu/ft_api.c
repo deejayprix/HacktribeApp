@@ -105,8 +105,8 @@ int ft_get_play_position(void)
     return g_live.step;
 }
 
-int ft_get_bpm(void)
-{
-    /* Default Fallback → kann später durch echten FW-Call ersetzt werden */
-    return 120;
-}
+/* NOTE:
+   ft_get_bpm() wird im Projekt bereits in sync.c bereitgestellt.
+   Damit es keine "multiple definition" Linker-Fehler gibt,
+   wird ft_get_bpm() hier NICHT noch einmal definiert.
+*/

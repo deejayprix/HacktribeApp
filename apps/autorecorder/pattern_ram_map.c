@@ -1,121 +1,207 @@
 #include "pattern_ram_map.h"
 #include "ft_types.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 
 /*
- * Pattern RAM Mapper (Software-Fallback Version)
+ * Pattern RAM Mapper (Hardened Version)
  *
- * Diese Datei stellt ein RAM-basiertes Pattern-Mapping bereit,
- * falls kein Firmware-Pattern-RAM verfügbar ist.
- *
- * Mit den letzten Fixes speichert/wiederherstellt dieses Modul nun
- * *vollständige ft_step_t-Strukturen* und ist damit kompatibel mit:
- *
- *  - pattern_writer.c
- *  - randomizer.c
- *  - undo-system
- *  - NRPN-/Pattern-Transformationspipelines
+ * Goals:
+ *  - Always write/read full ft_step_t
+ *  - Prevent out-of-bounds access via capacity tracking
+ *  - Keep API stable (only additive helper function)
+ *  - Optional debug guard prints (compile-time)
  */
 
-/* -------------------------------------------------------------
-   Interner Zustand
-   ------------------------------------------------------------- */
-static bool     g_enabled   = true;        // RAM-map aktiv?
-static uint8_t *g_base      = NULL;        // Zeiger auf RAM-Puffer
-static size_t   g_step_size = 0;           // Größe eines Steps in Bytes
+/* =========================
+   CONFIG: Debug Guards
+   ========================= */
+#ifndef PATTERN_RAM_MAP_DEBUG
+#define PATTERN_RAM_MAP_DEBUG 0
+#endif
 
+#if PATTERN_RAM_MAP_DEBUG
+#include "ft_api.h"
+#define PRM_DBG(...) ft_print(__VA_ARGS__)
+#else
+#define PRM_DBG(...) do{}while(0)
+#endif
 
-/* ----------------------------------------------------------------------------
-   Initialisierung der RAM-Map
+/* =========================
+   INTERNAL STATE
+   ========================= */
+static bool     g_enabled      = true;
+static uint8_t *g_base         = NULL;
+static size_t   g_step_size    = 0;      /* should be sizeof(ft_step_t) */
+static size_t   g_capacity_b   = 0;      /* size of RAM region in bytes */
 
-   Wichtig:
-   - g_step_size wird jetzt auf sizeof(ft_step_t) gesetzt
-   - fallback_ram ist groß genug für ca. 1024 Steps
-   ---------------------------------------------------------------------------- */
+/* fallback buffer (default) */
+#define FALLBACK_STEPS 1024
+
+/* =========================
+   INTERNAL HELPERS
+   ========================= */
+static inline size_t step_size_safe(void)
+{
+    return (g_step_size != 0) ? g_step_size : sizeof(ft_step_t);
+}
+
+static inline size_t max_steps_safe(void)
+{
+    size_t ss = step_size_safe();
+    if (!g_base || ss == 0 || g_capacity_b < ss) return 0;
+    return g_capacity_b / ss;
+}
+
+static inline bool idx_in_range(int idx)
+{
+    if (idx < 0) return false;
+    size_t maxs = max_steps_safe();
+    return ((size_t)idx < maxs);
+}
+
+/* =========================
+   PUBLIC API
+   ========================= */
 void pattern_ram_map_init(void)
 {
-    /* Schrittgröße = vollständige ft_step_t-Struktur */
     g_step_size = sizeof(ft_step_t);
 
-    /* Fallback-Speicher bereitstellen, falls nichts extern gesetzt wurde */
+    /* Provide fallback storage if not set */
     if (!g_base)
     {
-        /* 1024 Steps → reicht für Pattern aller Längen */
-        static uint8_t fallback_ram[sizeof(ft_step_t) * 1024];
+        static uint8_t fallback_ram[sizeof(ft_step_t) * FALLBACK_STEPS];
         g_base = fallback_ram;
+        g_capacity_b = sizeof(fallback_ram);
+    }
+    else
+    {
+        /* If base is already set but capacity not, we cannot safely bounds-check.
+           Keep available, but warn in debug mode. */
+        if (g_capacity_b == 0)
+            PRM_DBG("[pattern_ram_map] WARN: base set without capacity; bounds checks limited.\n");
     }
 
     g_enabled = true;
 }
 
-
-/* -------------------------------------------------------------
-   Map-Status abfragen
-   ------------------------------------------------------------- */
 bool pattern_ram_map_is_available(void)
 {
-    return g_enabled && g_base != NULL;
+    return g_enabled && (g_base != NULL);
 }
 
-
-/* -------------------------------------------------------------
-   Basisadresse des Pattern-RAM setzen (z. B. Firmware-RAM)
-   ------------------------------------------------------------- */
 void pattern_ram_map_set_base(void *addr)
 {
     g_base = (uint8_t *)addr;
+    /* legacy setter: capacity unknown -> no hard bounds possible unless user calls set_base_ex */
+    g_capacity_b = 0;
+#if PATTERN_RAM_MAP_DEBUG
+    PRM_DBG("[pattern_ram_map] set_base(addr=%p) capacity=UNKNOWN\n", addr);
+#endif
 }
 
+/* NEW (additive, safe): set base + size */
+void pattern_ram_map_set_base_ex(void *addr, size_t bytes)
+{
+    g_base = (uint8_t *)addr;
+    g_capacity_b = bytes;
+#if PATTERN_RAM_MAP_DEBUG
+    PRM_DBG("[pattern_ram_map] set_base_ex(addr=%p, bytes=%u)\n", addr, (unsigned)bytes);
+#endif
+}
 
-/* -------------------------------------------------------------
-   RAM-Map aktivieren/deaktivieren
-   ------------------------------------------------------------- */
 void pattern_ram_map_enable(bool enable)
 {
     g_enabled = enable;
 }
 
-
-/* -------------------------------------------------------------
-   Schrittgröße zurückgeben
-   ------------------------------------------------------------- */
 size_t pattern_ram_step_size(void)
 {
-    return g_step_size ? g_step_size : sizeof(ft_step_t);
+    return step_size_safe();
 }
 
+size_t pattern_ram_max_steps(void)
+{
+    return max_steps_safe();
+}
 
-/* ----------------------------------------------------------------------------
-   Adresse eines Steps im RAM berechnen
-   ---------------------------------------------------------------------------- */
 uint8_t *pattern_ram_step_address(int idx)
 {
-    if (!g_enabled || g_base == NULL)
+    if (!g_enabled || !g_base)
         return NULL;
 
-    size_t step = pattern_ram_step_size();
-    return g_base + (idx * step);
+    /* If capacity unknown, we can only compute address (legacy behavior).
+       If capacity known, enforce bounds. */
+    if (g_capacity_b != 0)
+    {
+        if (!idx_in_range(idx))
+        {
+            PRM_DBG("[pattern_ram_map] OOB step_address idx=%d (max=%u)\n",
+                    idx, (unsigned)max_steps_safe());
+            return NULL;
+        }
+    }
+    else
+    {
+        /* Capacity unknown: cannot bounds-check */
+        if (idx < 0) return NULL;
+    }
+
+    size_t ss = step_size_safe();
+    return g_base + ((size_t)idx * ss);
 }
 
-
-/* ----------------------------------------------------------------------------
-   Step in RAM schreiben
-
-   NEU (fix):
-   - Es wird *die gesamte ft_step_t-Struktur* geschrieben
-   - Dadurch sind part/step/pitch/velocity/gate konsistent
-   ---------------------------------------------------------------------------- */
+/* Write full ft_step_t to RAM */
 int pattern_ram_write_step(int part, int idx, const ft_step_t *s)
 {
     (void)part;
 
+    if (!g_enabled || !g_base || !s)
+        return 0;
+
+    /* If we know capacity, enforce bounds strictly */
+    if (g_capacity_b != 0 && !idx_in_range(idx))
+    {
+        PRM_DBG("[pattern_ram_map] OOB write idx=%d (max=%u)\n",
+                idx, (unsigned)max_steps_safe());
+        return 0;
+    }
+
+    /* Legacy mode (capacity unknown): best effort but still require non-negative index */
+    if (g_capacity_b == 0 && idx < 0)
+        return 0;
+
     uint8_t *p = pattern_ram_step_address(idx);
-    if (!p || !s)
+    if (!p)
         return 0;
 
     memcpy(p, s, sizeof(ft_step_t));
+    return 1;
+}
+
+/* NEW (additive): Read full ft_step_t from RAM */
+int pattern_ram_read_step(int idx, ft_step_t *out)
+{
+    if (!g_enabled || !g_base || !out)
+        return 0;
+
+    if (g_capacity_b != 0 && !idx_in_range(idx))
+    {
+        PRM_DBG("[pattern_ram_map] OOB read idx=%d (max=%u)\n",
+                idx, (unsigned)max_steps_safe());
+        return 0;
+    }
+
+    if (g_capacity_b == 0 && idx < 0)
+        return 0;
+
+    uint8_t *p = pattern_ram_step_address(idx);
+    if (!p)
+        return 0;
+
+    memcpy(out, p, sizeof(ft_step_t));
     return 1;
 }

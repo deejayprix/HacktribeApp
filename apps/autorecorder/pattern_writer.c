@@ -7,16 +7,33 @@
 #include <stdlib.h>
 
 /* Active page index */
-int g_active_page = 0;
-/* Default page size (may be overridden by firmware calls) */
-int g_page_size   = FT_DEFAULT_PAGE_SIZE;
+static int g_active_page = 0;
+/* Default page size (may be overridden by firmware calls / config) */
+static int g_page_size   = FT_DEFAULT_PAGE_SIZE;
+
+/* -------------------------------------------------------------
+   Internal helpers
+   ------------------------------------------------------------- */
+static inline int clampi(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static inline int safe_page_size(void)
+{
+    int ps = g_page_size;
+    if (ps <= 0) ps = 64;
+    return ps;
+}
 
 /* -------------------------------------------------------------------
    Page helpers
    ------------------------------------------------------------------- */
 int pattern_get_paging_page_size(void)
 {
-    return g_page_size;
+    return safe_page_size();
 }
 
 int pattern_get_active_page(void)
@@ -30,6 +47,13 @@ void pattern_set_active_page(int page)
     g_active_page = page;
 }
 
+/* Compatibility: some modules call this name and expect int return */
+int pattern_set_current_page(int page)
+{
+    pattern_set_active_page(page);
+    return g_active_page;
+}
+
 /* -------------------------------------------------------------------
    STEP READ API
    ------------------------------------------------------------------- */
@@ -39,37 +63,49 @@ int pattern_read_page(int part, ft_step_t *dst, int nsteps, int page)
 {
     if (!dst || nsteps <= 0) return 0;
 
+    int ps = safe_page_size();
+    if (nsteps > ps) nsteps = ps;
+    if (page < 0) page = 0;
+
+    int offset = page * ps;
+
     /* If RAM map is available, read from RAM */
     if (pattern_ram_map_is_available())
     {
-        size_t step = pattern_ram_step_size();
-        if (step == 0) step = sizeof(ft_step_t);
-
-        int offset = page * pattern_get_paging_page_size();
-
         for (int i = 0; i < nsteps; ++i)
         {
-            uint8_t *src = pattern_ram_step_address(offset + i);
-            if (!src)
+            ft_step_t tmp;
+            int ok = 0;
+
+            /* Prefer hardened helper if present */
+            ok = pattern_ram_read_step(offset + i, &tmp);
+
+            if (!ok)
             {
                 memset(&dst[i], 0, sizeof(ft_step_t));
+                dst[i].part = (uint8_t)part;
+                dst[i].step = (uint8_t)i;
                 continue;
             }
 
-            /* Restore full ft_step_t from RAM area.
-               We expect the RAM to contain a serialized ft_step_t. */
-            memcpy(&dst[i], src, sizeof(ft_step_t));
+            /* Keep stored values, but enforce caller expectation:
+               - correct part
+               - step index relative to page (0..ps-1) */
+            tmp.part = (uint8_t)part;
+            tmp.step = (uint8_t)i;
 
-            /* Ensure part/step fields are consistent with caller expectations */
-            dst[i].part = part;
-            dst[i].step = i;
+            dst[i] = tmp;
         }
 
         return nsteps;
     }
 
     /* fallback: blank steps */
-    memset(dst, 0, sizeof(ft_step_t) * nsteps);
+    memset(dst, 0, sizeof(ft_step_t) * (size_t)nsteps);
+    for (int i = 0; i < nsteps; ++i) {
+        dst[i].part = (uint8_t)part;
+        dst[i].step = (uint8_t)i;
+    }
     return nsteps;
 }
 
@@ -89,39 +125,42 @@ int pattern_write_page(int part, const ft_step_t *src, int nsteps, int page)
 {
     if (!src || nsteps <= 0) return 0;
 
-    /* raw RAM write if available */
+    int ps = safe_page_size();
+    if (nsteps > ps) nsteps = ps;
+    if (page < 0) page = 0;
+
+    int offset = page * ps;
+
+    /* RAM write if available */
     if (pattern_ram_map_is_available())
     {
-        int offset = page * pattern_get_paging_page_size();
-
         for (int i = 0; i < nsteps; ++i)
         {
-            /* ensure part/step fields are saved as provided src may not set them */
             ft_step_t tmp;
             memcpy(&tmp, &src[i], sizeof(ft_step_t));
+
+            /* enforce canonical fields */
             tmp.part = (uint8_t)part;
             tmp.step = (uint8_t)i;
+
             pattern_ram_write_step(part, offset + i, &tmp);
         }
-
         return nsteps;
     }
 
-    /* fallback: use ft_api (expects a pointer to ft_step_t) */
+    /* fallback: use firmware write */
     for (int i = 0; i < nsteps; ++i)
     {
         ft_step_t tmp = src[i];
-        /* ensure part/step fields are set */
-        tmp.part = part;
-        /* tmp.step should already be set in src[i], but keep as-is */
-        (void)ft_write_step(&tmp); /* ignore return value */
+        tmp.part = (uint8_t)part;
+        tmp.step = (uint8_t)i;
+        (void)ft_write_step(&tmp);
     }
 
     return nsteps;
 }
 
-
-/* High-level write wrapper */
+/* High-level write wrapper (writes a block starting at step 0 of the active page) */
 int pattern_write_steps(int part, const ft_step_t *src, int n)
 {
     if (!src || n <= 0) return 0;
@@ -129,26 +168,38 @@ int pattern_write_steps(int part, const ft_step_t *src, int n)
 }
 
 /* -------------------------------------------------------------------
-   Single-step writer (simple wrapper)
+   Single-step writer (FIXED)
+   IMPORTANT: Must write to the requested step index, not always step 0.
    ------------------------------------------------------------------- */
 int pattern_write_step(int part, int step, int pitch, int velocity, int gate)
 {
-    ft_step_t s = {
-        .part     = (uint8_t)part,
-        .step     = (uint8_t)step,
-        .pitch    = (uint8_t)pitch,
-        .velocity = (uint8_t)velocity,
-        .gate     = (uint8_t)gate
-    };
+    int ps = safe_page_size();
+    step = clampi(step, 0, ps - 1);
 
-    return pattern_write_steps(part, &s, 1);
+    ft_step_t s;
+    memset(&s, 0, sizeof(s));
+    s.part     = (uint8_t)part;
+    s.step     = (uint8_t)step;
+    s.pitch    = (uint8_t)pitch;
+    s.velocity = (uint8_t)velocity;
+    s.gate     = (uint8_t)gate;
+
+    /* If RAM is available, write directly at correct physical index */
+    if (pattern_ram_map_is_available())
+    {
+        int offset = g_active_page * ps;
+        return pattern_ram_write_step(part, offset + step, &s);
+    }
+
+    /* firmware fallback */
+    return (int)ft_write_step(&s);
 }
 
 /* -------------------------------------------------------------
    Compatibility shim: set pattern (page) number
+   (Some firmware hooks call this)
    ------------------------------------------------------------- */
 void set_pattern_number(int pat)
 {
-    if (pat < 0) pat = 0;
-    g_active_page = pat;
+    pattern_set_active_page(pat);
 }

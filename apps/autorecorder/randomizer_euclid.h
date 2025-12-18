@@ -3,25 +3,12 @@
 
 #include <stdint.h>
 
-/* If the project already defines these, keep those values */
-#ifndef RANDOMIZER_MAX_CHANNELS
-#define RANDOMIZER_MAX_CHANNELS 16
-#endif
-
-#ifndef EUCLID_MAX_SLOTS_PER_CH
-#define EUCLID_MAX_SLOTS_PER_CH 4
-#endif
-
-#ifndef EUCLID_MAX_STEPS
-#define EUCLID_MAX_STEPS 32
-#endif
-
-/* Euclid modes (Variant A: PROBABILITY removed) */
-typedef enum {
-    EU_MODE_OFF = 0,
-    EU_MODE_STANDARD = 1,
-    EU_MODE_FILL = 2
-} eu_mode_t;
+/*
+   NOTE:
+   This header exists in the project, but the current build uses randomizer.h
+   as the primary API surface. We keep this file consistent and compatible,
+   without removing existing declarations.
+*/
 
 /* Public getters used by mod_matrix / other modules */
 int randomizer_get_euclid_value_public(int ch, int slot, int step_index);
@@ -32,6 +19,7 @@ void randomizer_euclid_stage_slot(int slot);
 void randomizer_euclid_stage_pulses(int p);
 void randomizer_euclid_stage_steps(int s);
 void randomizer_euclid_stage_rotation(int r);
+void randomizer_euclid_stage_probability(int p);
 void randomizer_euclid_stage_mode(uint8_t m);
 void randomizer_euclid_commit(void);
 

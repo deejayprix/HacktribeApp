@@ -8,16 +8,13 @@
 #include "scale_engine.h"
 #include "condition_engine.h"
 
-
 /* ========= CONSTANTS ========= */
-#define RANDOMIZER_MAX_CHANNELS      16
-#define RANDOMIZER_MAX_STEPS         64
-#define RANDOMIZER_MAX_MOTION_LANES  8
-#define RANDOMIZER_MAX_MOTION_LEN    64
-#define RANDOMIZER_UNDO_SLOTS        16
-#define RANDOMIZER_MAX_EU_SLOTS_PER_CH 4
-
-
+#define RANDOMIZER_MAX_CHANNELS         16
+#define RANDOMIZER_MAX_STEPS            64
+#define RANDOMIZER_MAX_MOTION_LANES     8
+#define RANDOMIZER_MAX_MOTION_LEN       64
+#define RANDOMIZER_UNDO_SLOTS           16
+#define RANDOMIZER_MAX_EU_SLOTS_PER_CH  4
 
 /* ========= EUCLID MODES ========= */
 typedef enum {
@@ -108,6 +105,11 @@ int randomizer_get_euclid_value_public(int ch, int slot_id, int step_index);
 void randomizer_init_default(void);
 void randomizer_tick_once(void);
 
+/* Public Euclid storage */
 extern eu_channel_t g_eu_channels[RANDOMIZER_MAX_CHANNELS];
+
+/* NRPN router compatibility (Variant A) */
+extern int eu_stage_channel;
+extern int eu_stage_slot;
 
 #endif /* RANDOMIZER_H */

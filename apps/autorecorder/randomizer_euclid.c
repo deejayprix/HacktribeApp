@@ -1,12 +1,30 @@
-#include "euclid_engine_v2.h"
+/* ============================================================
+   randomizer_euclid.c
+   ------------------------------------------------------------
+   Euclid Engine Integration for Randomizer
+   Phase 2 – Step 7 (FINAL, BUILD-STABLE)
+
+   Ownership:
+   - eu_stage_channel / eu_stage_slot are OWNED by NRPN layer
+     (defined once in euclid_nrpn_stubs.c)
+   - This file ONLY uses them via extern
+
+   Compatible with:
+   - randomizer.c
+   - euclid_engine_v2.c
+   - nrpn_router.c
+   ============================================================ */
+
 #include "randomizer.h"
+#include "euclid_engine_v2.h"
 #include "rng.h"
+
 #include <stdint.h>
 #include <stdbool.h>
 
-
-
-/* We define clampi BEFORE any use */
+/* ------------------------------------------------------------
+   Helpers
+   ------------------------------------------------------------ */
 static inline int clampi(int v, int lo, int hi)
 {
     if (v < lo) return lo;
@@ -14,31 +32,33 @@ static inline int clampi(int v, int lo, int hi)
     return v;
 }
 
-/* ============================================================
-   EUCLID STAGED PARAMETERS
-   ============================================================ */
+/* ------------------------------------------------------------
+   NRPN-owned staging variables (extern, NOT defined here)
+   ------------------------------------------------------------ */
+extern int eu_stage_channel;
+extern int eu_stage_slot;
 
-static int eu_stage_ch = 0;
-static int eu_stage_slot = 0;
+/* ------------------------------------------------------------
+   Local staged parameters (value staging only)
+   ------------------------------------------------------------ */
+static int       eu_stage_pulses      = 0;
+static int       eu_stage_steps       = 16;
+static int       eu_stage_rotation    = 0;
+static int       eu_stage_probability = 127;
+static eu_mode_t eu_stage_mode        = EU_MODE_STANDARD;
 
-static int eu_stage_pulses = 0;
-static int eu_stage_steps  = 16;
-static int eu_stage_rotation = 0;
-static int eu_stage_probability = 127;
-static eu_mode_t eu_stage_mode = EU_MODE_STANDARD;
-
-/* ============================================================
-   EXPORTED GLOBAL ARRAY FROM randomizer.c
-   ============================================================ */
+/* ------------------------------------------------------------
+   Global Euclid storage (defined in randomizer.c)
+   ------------------------------------------------------------ */
 extern eu_channel_t g_eu_channels[RANDOMIZER_MAX_CHANNELS];
 
 /* ============================================================
-   STAGE SETTERS (NRPN)
+   STAGE SETTERS (called from NRPN router)
    ============================================================ */
 
 void randomizer_euclid_stage_channel(int ch)
 {
-    eu_stage_ch = clampi(ch, 0, RANDOMIZER_MAX_CHANNELS - 1);
+    eu_stage_channel = clampi(ch, 0, RANDOMIZER_MAX_CHANNELS - 1);
 }
 
 void randomizer_euclid_stage_slot(int slot)
@@ -68,43 +88,53 @@ void randomizer_euclid_stage_probability(int p)
 
 void randomizer_euclid_stage_mode(uint8_t m)
 {
-    if (m > EU_MODE_PROB) m = EU_MODE_PROB;
+    if (m > EU_MODE_PROB)
+        m = EU_MODE_PROB;
+
     eu_stage_mode = (eu_mode_t)m;
 }
 
 /* ============================================================
-   COMMIT — builds compiled Euclid lane
+   COMMIT — compile Euclid pattern into slot
    ============================================================ */
 
 void randomizer_euclid_commit(void)
 {
-    eu_channel_t *ch = &g_eu_channels[eu_stage_ch];
-    eu_slot_t *slot = &ch->slots[eu_stage_slot];
+    if (eu_stage_channel < 0 || eu_stage_channel >= RANDOMIZER_MAX_CHANNELS)
+        return;
 
-    slot->pulses = eu_stage_pulses;
-    slot->steps  = eu_stage_steps;
-    slot->rotation = eu_stage_rotation;
-    slot->probability = eu_stage_probability;
-    slot->mode = eu_stage_mode;
+    if (eu_stage_slot < 0 || eu_stage_slot >= RANDOMIZER_MAX_EU_SLOTS_PER_CH)
+        return;
+
+    eu_channel_t *ch  = &g_eu_channels[eu_stage_channel];
+    eu_slot_t    *sl  = &ch->slots[eu_stage_slot];
+
+    sl->pulses      = eu_stage_pulses;
+    sl->steps       = eu_stage_steps;
+    sl->rotation    = eu_stage_rotation;
+    sl->probability = eu_stage_probability;
+    sl->mode        = eu_stage_mode;
 
     uint8_t gates[RANDOMIZER_MAX_STEPS] = {0};
 
-    int ret = euclid_generate(slot->steps,
-                              slot->pulses,
-                              slot->rotation,
-                              gates);
+    int ret = euclid_generate(
+        sl->steps,
+        sl->pulses,
+        sl->rotation,
+        gates
+    );
 
     if (ret > 0)
     {
-        for (int i = 0; i < slot->steps; ++i)
-            slot->compiled[i] = gates[i];
+        for (int i = 0; i < sl->steps; ++i)
+            sl->compiled[i] = gates[i];
     }
 
-    slot->enabled = true;
+    sl->enabled = true;
 }
 
 /* ============================================================
-   Enable/disable slot
+   Enable / Disable Euclid slot
    ============================================================ */
 
 void randomizer_euclid_set_enabled(int ch, int slot, int en)
@@ -116,7 +146,7 @@ void randomizer_euclid_set_enabled(int ch, int slot, int en)
 }
 
 /* ============================================================
-   Live rotation (NRPN 0x2109)
+   Live rotate (delta-based)
    ============================================================ */
 
 void randomizer_euclid_live_rotate(int ch, int slot, int delta)
@@ -128,24 +158,27 @@ void randomizer_euclid_live_rotate(int ch, int slot, int delta)
 }
 
 /* ============================================================
-   Query compiled gate value (used by randomizer.c)
+   Query compiled gate value
+   Used by Randomizer / Mod Matrix
    ============================================================ */
 
 int randomizer_get_euclid_value_public(int ch, int slot, int step)
 {
     if (ch < 0 || ch >= RANDOMIZER_MAX_CHANNELS) return 0;
     if (slot < 0 || slot >= RANDOMIZER_MAX_EU_SLOTS_PER_CH) return 0;
+
     eu_slot_t *s = &g_eu_channels[ch].slots[slot];
+
     if (!s->enabled) return 0;
     if (step < 0 || step >= s->steps) return 0;
 
-    /* probability override mode */
+    /* Probability override mode */
     if (s->mode == EU_MODE_PROB)
     {
         int r = (int)(rng_get() & 0x7F);
         return (r < s->probability) ? 1 : 0;
     }
 
-    /* normal compiled gate */
+    /* Normal compiled gate */
     return (s->compiled[step] != 0);
 }
