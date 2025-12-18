@@ -1,3 +1,8 @@
+/* ============================================================
+   apps/autorecorder/nrpn_router.c   (vollständig)
+   + 3.2.3.13.4 – Final Defaults & Phase-3-Lock
+   NRPN: MSB 51 / LSB 3,4,20,21
+   ============================================================ */
 #include <stdint.h>
 #include <stdio.h>
 
@@ -40,9 +45,6 @@ static nrpn_tx_state_t g_nrpn = {
 static int g_cond_part = 0;
 static int g_cond_step = 0;
 
-/* Groove staging */
-static int g_groove_part = 0;
-
 /* ============================================================
    INTERNAL HELPERS
    ============================================================ */
@@ -77,8 +79,8 @@ static inline uint16_t nrpn_build_id(void)
 
 static void nrpn_dispatch(uint16_t nrpn, int value)
 {
-    uint8_t msb = nrpn >> 7;
-    uint8_t lsb = nrpn & 0x7F;
+    uint8_t msb = (uint8_t)(nrpn >> 7);
+    uint8_t lsb = (uint8_t)(nrpn & 0x7F);
 
     /* --------------------------------------------------------
        MSB 40 — Randomizer Core
@@ -205,55 +207,30 @@ static void nrpn_dispatch(uint16_t nrpn, int value)
     }
 
     /* --------------------------------------------------------
-       MSB 51 — Groove Engine (Phase 3.2.3)
+       MSB 51 — Groove Engine
        -------------------------------------------------------- */
     if (msb == 51)
     {
         switch (lsb)
         {
-            /* Addressing */
-            case 0:
-                g_groove_part = value;
-                groove_stage_part(value);
-                return;
-
-            /* 3.2.3.2 Micro-Timing */
+            /* 3.2.3.2 Micro-Timing Amount */
             case 3:
-                groove_set_microtiming(g_groove_part, value);
+                groove_set_timing_amount((uint8_t)(value & 0x7F));
                 return;
 
-            /* 3.2.3.3 Velocity Swing */
+            /* 3.2.3.3 Velocity Swing Amount */
             case 4:
-                groove_set_velocity_swing(g_groove_part, value);
+                groove_set_velocity_amount((uint8_t)(value & 0x7F));
                 return;
 
-            /* 3.2.3.4 Pattern-aware */
-            case 5:
-                groove_set_pattern_aware(g_groove_part, value ? 1 : 0);
+            /* 3.2.3.12 One-Knob Macro */
+            case 20:
+                groove_set_macro((uint8_t)(value & 0x7F));
                 return;
 
-            /* Presets */
-            case 6:
-                groove_preset_select(value);
-                return;
-
-            case 7:
-                if (value == 1)
-                    groove_preset_apply_to_part(g_groove_part);
-                return;
-
-            /* 3.2.3.8 Debug */
-            case 8:
-                groove_debug_enable(value ? 1 : 0);
-                return;
-
-            case 9:
-                if (value == 1)
-                    groove_debug_dump_staged();
-                return;
-
-            case 10:
-                groove_debug_dump_part(value);
+            /* 3.2.3.13.4 Phase-3 Lock (Enable) */
+            case 21:
+                groove_set_enabled((uint8_t)(value ? 1 : 0));
                 return;
         }
         return;
