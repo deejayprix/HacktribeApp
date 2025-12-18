@@ -205,3 +205,8 @@ int pattern_ram_read_step(int idx, ft_step_t *out)
     memcpy(out, p, sizeof(ft_step_t));
     return 1;
 }
+typedef struct {
+    uint8_t gate;
+    uint8_t velocity;
+    uint8_t repeat;   // 1 = normal, >1 = Step Repeater
+} ft_step_ext_t;

@@ -71,11 +71,11 @@ typedef struct {
    CORE ENGINE API
    ============================================================ */
 
-int  condition_engine_init(void);
+int condition_engine_init(void);
 
-int  ensure_step_condition_size(int steps);
+int ensure_step_condition_size(int steps);
 
-int  evaluate_step_condition(
+int evaluate_step_condition(
         int part,
         int step,
         int prev_gate,
@@ -84,7 +84,7 @@ int  evaluate_step_condition(
         const ft_step_t *other);
 
 /* ============================================================
-   NODE MANAGEMENT (Randomizer / NRPN)
+   NODE MANAGEMENT (Randomizer / Internal)
    ============================================================ */
 
 int randomizer_create_condition_node(cond_basic_t type, int param);
@@ -113,15 +113,6 @@ int randomizer_assign_condition_to_step(
 int randomizer_clear_step_condition(int part, int step);
 
 /* ============================================================
-   NRPN STAGING
-   ============================================================ */
-
-void nrpn_condition_stage_part(int part);
-void nrpn_condition_stage_step(int step);
-void nrpn_condition_stage_node(int node);
-void nrpn_condition_commit(void);
-
-/* ============================================================
    STAGING API (ENGINE SIDE)
    ============================================================ */
 
@@ -131,10 +122,53 @@ void condition_stage_node(int node);
 void condition_commit(void);
 
 /* ============================================================
-   DEBUG / INTROSPECTION (Phase 2 – Step 11)
+   STAGING GETTERS (Preset Browser / Debug)
    ============================================================ */
 
+int condition_get_staged_part(void);
+int condition_get_staged_step(void);
+
+/* ============================================================
+   NRPN WRAPPERS (Router-facing API)
+   ============================================================ */
+
+void nrpn_condition_stage_part(int part);
+void nrpn_condition_stage_step(int step);
+void nrpn_condition_stage_node(int node);
+void nrpn_condition_commit(void);
+
+void nrpn_condition_node_create(int basic_type);
+void nrpn_condition_node_set_param(int param);
+void nrpn_condition_node_to_and(int right_node);
+void nrpn_condition_node_to_or(int right_node);
+void nrpn_condition_node_to_not(void);
+void nrpn_condition_node_delete(int node_id);
+
+/* ============================================================
+   DEBUG / VISUALIZER (Phase 3.1)
+   ============================================================ */
+
+/* Enable / disable debug output */
+void condition_debug_enable(int on);
+
+/* Select debug scope */
+void condition_debug_select(int part, int step);
+
+/* Dump current step condition */
+void condition_debug_dump_step(void);
+
+/* Dump node graph starting at node_id */
+void condition_debug_dump_node(int node_id);
+
+/* Extended debug */
+void condition_debug_set_mode(int mode);   /* 0..2 */
 int  condition_debug_node_count(void);
 void condition_debug_dump_current(void);
+
+/* ============================================================
+   Phase 3.2.1 – Per-Step Probability
+   ============================================================ */
+
+void condition_set_step_probability(int part, int step, int prob);
 
 #endif /* CONDITION_ENGINE_H */

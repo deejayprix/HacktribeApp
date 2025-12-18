@@ -26,6 +26,13 @@ static motion_lane_t g_motions[RANDOMIZER_MAX_MOTION_LANES];
 static randomizer_undo_entry_t g_undo[RANDOMIZER_UNDO_SLOTS];
 static int g_undo_top = 0;
 
+/* ============================================================
+   STEP REPEATER (ENGINE-STATE)
+   - Not stored in ft_step_t
+   - Default 1 (normal)
+   ============================================================ */
+static uint8_t g_step_repeat[RANDOMIZER_MAX_CHANNELS][RANDOMIZER_MAX_STEPS];
+
 /* ------------------------------------------------------------ */
 
 static inline int clampi(int v, int lo, int hi)
@@ -73,6 +80,30 @@ int randomizer_get_section(void)
 int randomizer_get_variation(void)
 {
     return g_variation;
+}
+
+/* ------------------------------------------------------------
+   Step Repeater (engine-state)
+   ------------------------------------------------------------ */
+
+void randomizer_set_step_repeat(int part, int step, int repeat)
+{
+    if (part < 0 || part >= RANDOMIZER_MAX_CHANNELS) return;
+    if (step < 0 || step >= RANDOMIZER_MAX_STEPS) return;
+
+    repeat = clampi(repeat, STEP_REPEAT_MIN, STEP_REPEAT_MAX);
+    g_step_repeat[part][step] = (uint8_t)repeat;
+}
+
+int randomizer_get_step_repeat(int part, int step)
+{
+    if (part < 0 || part >= RANDOMIZER_MAX_CHANNELS) return STEP_REPEAT_MIN;
+    if (step < 0 || step >= RANDOMIZER_MAX_STEPS) return STEP_REPEAT_MIN;
+
+    int r = (int)g_step_repeat[part][step];
+    if (r < STEP_REPEAT_MIN) r = STEP_REPEAT_MIN;
+    if (r > STEP_REPEAT_MAX) r = STEP_REPEAT_MAX;
+    return r;
 }
 
 /* ------------------------------------------------------------
@@ -235,6 +266,8 @@ int randomize_and_write_pattern_paged(int part,
                                       int section,
                                       int page)
 {
+    (void)page;
+
     ft_step_t tmp[RANDOMIZER_MAX_STEPS];
     int n = randomize_generate_pattern(part, steps_count, tmp, section);
 
@@ -275,6 +308,11 @@ void randomizer_init_default(void)
         undo_clear_entry(&g_undo[i]);
 
     g_undo_top = 0;
+
+    /* Step repeater defaults */
+    for (int p = 0; p < RANDOMIZER_MAX_CHANNELS; ++p)
+        for (int s = 0; s < RANDOMIZER_MAX_STEPS; ++s)
+            g_step_repeat[p][s] = (uint8_t)STEP_REPEAT_MIN;
 }
 
 void randomizer_tick_once(void)

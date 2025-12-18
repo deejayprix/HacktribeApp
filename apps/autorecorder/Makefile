@@ -25,7 +25,7 @@ SRCS := \
     sysex_helper.c \
     ui_messages.c \
     condition_engine.c \
-    condition_stubs.c \
+    condition_presets.c \
     euclid_nrpn_stubs.c \
     pattern_write_dummy.c \
     composer_padmap.c \
@@ -33,6 +33,7 @@ SRCS := \
     composer.c \
     composer_utils.c \
     composer_bridge.c \
+    groove_engine.c \
     cpu/save_manager_stubs.c \
     cpu/startup.s \
     cpu/vectors.s \

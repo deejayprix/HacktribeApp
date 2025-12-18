@@ -5,6 +5,7 @@
 #include "randomizer.h"
 #include "mod_matrix.h"
 #include "condition_engine.h"
+#include "condition_presets.h"
 #include "live_fx.h"
 #include "pattern_writer.h"
 #include "pattern_ram_map.h"
@@ -12,6 +13,7 @@
 #include "ft_api.h"
 #include "scale_engine.h"
 #include "composer.h"
+#include "groove_engine.h"
 
 /* ============================================================
    NRPN TRANSACTION GUARD
@@ -33,6 +35,17 @@ static nrpn_tx_state_t g_nrpn = {
     .last_tick = 0,
     .active = 0
 };
+
+/* Condition staging */
+static int g_cond_part = 0;
+static int g_cond_step = 0;
+
+/* Groove staging */
+static int g_groove_part = 0;
+
+/* ============================================================
+   INTERNAL HELPERS
+   ============================================================ */
 
 static inline void nrpn_tx_reset(void)
 {
@@ -59,37 +72,32 @@ static inline uint16_t nrpn_build_id(void)
 }
 
 /* ============================================================
-   DISPATCH
+   NRPN DISPATCH
    ============================================================ */
 
 static void nrpn_dispatch(uint16_t nrpn, int value)
 {
-    /* ========================================================
-       7-bit groups
-       ======================================================== */
     uint8_t msb = nrpn >> 7;
     uint8_t lsb = nrpn & 0x7F;
 
     /* --------------------------------------------------------
-       MSB 40 — Randomizer
+       MSB 40 — Randomizer Core
        -------------------------------------------------------- */
     if (msb == 40)
     {
         switch (lsb)
         {
-            case 10: randomizer_set_density(value); return;
+            case 10: randomizer_set_density(value);   return;
             case 11: randomizer_set_variation(value); return;
-            case 15: randomizer_set_freeze(value); return;
-            case 20: randomizer_set_section(value); return;
-            case 80: randomizer_set_seed(value); return;
-            default:
-                ft_print("[NRPN 40] Unknown LSB=%d\n", lsb);
-                return;
+            case 15: randomizer_set_freeze(value);    return;
+            case 20: randomizer_set_section(value);   return;
+            case 80: randomizer_set_seed(value);      return;
         }
+        return;
     }
 
     /* --------------------------------------------------------
-       MSB 41 — Global / Write / Undo / Song / Clear
+       MSB 41 — Global / Write / Song / Clear
        -------------------------------------------------------- */
     if (msb == 41)
     {
@@ -110,15 +118,12 @@ static void nrpn_dispatch(uint16_t nrpn, int value)
                 return;
 
             case 3:
-                if (value >= 0 && value < RANDOMIZER_MAX_CHANNELS)
-                {
-                    int ps = pattern_get_paging_page_size();
-                    randomize_and_write_pattern_paged(
-                        value, ps,
-                        randomizer_get_section(),
-                        pattern_get_active_page()
-                    );
-                }
+                randomize_and_write_pattern_paged(
+                    value,
+                    pattern_get_paging_page_size(),
+                    randomizer_get_section(),
+                    pattern_get_active_page()
+                );
                 return;
 
             case 6:
@@ -126,126 +131,133 @@ static void nrpn_dispatch(uint16_t nrpn, int value)
                     randomizer_undo_last_public();
                 return;
 
-            /* Song Mode NRPN passthrough */
             case 30:
                 song_mode_handle_nrpn(70, value);
                 return;
 
             case 50:
-                if (value == 127)
-                    pattern_clear_nrpn(-1);
-                else
-                    pattern_clear_nrpn(value);
+                pattern_clear_nrpn(value == 127 ? -1 : value);
                 return;
         }
-
-        ft_print("[NRPN 41] Unknown LSB=%d\n", lsb);
         return;
     }
 
     /* --------------------------------------------------------
-       MSB 42 — Composer Presets (Step 9 Option 4 + Option 3 hook)
-       -------------------------------------------------------- */
-    if (msb == 42)
-    {
-        static int genre = GENRE_ACID_TECHNO;
-        static int section = SECTION_INTRO;
-        static int segment = 0;
-        static int start_page = 0;
-
-        switch (lsb)
-        {
-            case 0: genre = value; composer_set_genre((uint8_t)value); return;
-            case 1: section = value; return;
-            case 2: segment = value; return;
-            case 3: start_page = value; return;
-
-            /* Generate */
-            case 10:
-                if (value == 1)
-                    composer_generate_segment((uint8_t)genre,
-                                             (composer_section_t)section,
-                                             (uint8_t)segment,
-                                             (uint8_t)pattern_get_active_page());
-                return;
-
-            case 11:
-                if (value == 1)
-                    composer_generate_section((uint8_t)genre,
-                                             (composer_section_t)section,
-                                             (uint8_t)pattern_get_active_page());
-                return;
-
-            case 12:
-                if (value == 1)
-                    composer_generate_song((uint8_t)genre,
-                                          (uint8_t)pattern_get_active_page());
-                return;
-
-            /* Preset Recall ONLY (Policy apply, no write) */
-            case 20:
-                if (value == 1)
-                    composer_preset_recall((uint8_t)genre,
-                                           (composer_section_t)section,
-                                           (uint8_t)segment);
-                return;
-
-            /* SongMode “now active section/segment” hook */
-            case 30:
-                if (value == 1)
-                    composer_songmode_on_section((uint8_t)section,
-                                                 (uint8_t)segment);
-                return;
-        }
-
-        ft_print("[NRPN 42] Unknown LSB=%d\n", lsb);
-        return;
-    }
-
-    /* --------------------------------------------------------
-       MSB 50 — Motion / Mod / Condition / Scale / Live FX
+       MSB 50 — Condition / Randomizer Extensions / Debug
        -------------------------------------------------------- */
     if (msb == 50)
     {
-        static int motion_lane = -1;
-        static int motion_idx  = -1;
-
         switch (lsb)
         {
-            case 80: motion_lane = value; return;
-            case 81: randomizer_create_motion_lane(motion_lane, value); return;
-            case 82: motion_lane = value; return;
-            case 83: motion_idx = value; return;
-            case 84: randomizer_set_motion_value(motion_lane, motion_idx, value); return;
+            /* Condition addressing */
+            case 90: g_cond_part = value; nrpn_condition_stage_part(value); return;
+            case 91: g_cond_step = value; nrpn_condition_stage_step(value); return;
 
-            case 85: mod_matrix_stage_source(value); return;
-            case 86: mod_matrix_stage_destination(value); return;
-            case 87: mod_matrix_stage_argument(value); return;
-            case 88: mod_matrix_stage_amount(value); return;
-            case 89: mod_matrix_commit_route(); return;
-
-            case 90: nrpn_condition_stage_part(value); return;
-            case 91: nrpn_condition_stage_step(value); return;
+            /* Node staging */
             case 92: nrpn_condition_stage_node(value); return;
             case 94: nrpn_condition_commit(); return;
 
-            case 100: nrpn_scale_stage_channel(value); return;
-            case 101: nrpn_scale_stage_type(value); return;
-            case 102: nrpn_scale_stage_tonic(value); return;
-            case 103: nrpn_scale_commit(); return;
-            case 104: nrpn_scale_reset(); return;
+            /* Node editing */
+            case 93: nrpn_condition_node_create(value); return;
+            case 95: nrpn_condition_node_set_param(value); return;
+            case 96: nrpn_condition_node_to_and(value); return;
+            case 97: nrpn_condition_node_to_or(value); return;
+            case 98: nrpn_condition_node_to_not(); return;
+            case 99: nrpn_condition_node_delete(value); return;
 
+            /* Phase 3.2.1 — Per-Step Probability */
+            case 110:
+                condition_set_step_probability(
+                    g_cond_part,
+                    g_cond_step,
+                    value
+                );
+                return;
+
+            /* Phase 3.2.2 — Step Repeater */
+            case 111:
+                randomizer_set_step_repeat(
+                    g_cond_part,
+                    g_cond_step,
+                    value
+                );
+                return;
+
+            /* Phase 3.1.5 — Condition Preset Browser */
+            case 112: condition_preset_select(value); return;
+            case 113: condition_preset_set_param(value); return;
+            case 114: if (value == 1) condition_preset_apply_to_staged_step(); return;
+            case 115: if (value == 1) condition_preset_dump(); return;
+
+            /* Debug Visualizer */
+            case 120: condition_debug_enable(value); return;
+            case 121: condition_debug_select(value, g_cond_step); return;
+            case 122: condition_debug_select(g_cond_part, value); return;
+            case 123: condition_debug_dump_step(); return;
+            case 124: condition_debug_dump_node(value); return;
+
+            /* Live FX */
             case 60: live_fx_set_variation_boost(value); return;
             case 61: live_fx_trigger_fill_now(); return;
             case 62: live_fx_set_mutation(value); return;
-
-            default:
-                ft_print("[NRPN 50] Unknown LSB=%d\n", lsb);
-                return;
         }
+        return;
     }
 
-    ft_print("[NRPN] Unknown MSB=%d LSB=%d\n", msb, lsb);
+    /* --------------------------------------------------------
+       MSB 51 — Groove Engine (Phase 3.2.3)
+       -------------------------------------------------------- */
+    if (msb == 51)
+    {
+        switch (lsb)
+        {
+            /* Addressing */
+            case 0:
+                g_groove_part = value;
+                groove_stage_part(value);
+                return;
+
+            /* 3.2.3.2 Micro-Timing */
+            case 3:
+                groove_set_microtiming(g_groove_part, value);
+                return;
+
+            /* 3.2.3.3 Velocity Swing */
+            case 4:
+                groove_set_velocity_swing(g_groove_part, value);
+                return;
+
+            /* 3.2.3.4 Pattern-aware */
+            case 5:
+                groove_set_pattern_aware(g_groove_part, value ? 1 : 0);
+                return;
+
+            /* Presets */
+            case 6:
+                groove_preset_select(value);
+                return;
+
+            case 7:
+                if (value == 1)
+                    groove_preset_apply_to_part(g_groove_part);
+                return;
+
+            /* 3.2.3.8 Debug */
+            case 8:
+                groove_debug_enable(value ? 1 : 0);
+                return;
+
+            case 9:
+                if (value == 1)
+                    groove_debug_dump_staged();
+                return;
+
+            case 10:
+                groove_debug_dump_part(value);
+                return;
+        }
+        return;
+    }
 }
 
 /* ============================================================
@@ -261,10 +273,6 @@ void nrpn_handle(int channel, int cc, int value)
 
     if (cc == 99)
     {
-        if (g_nrpn.active &&
-            (now - g_nrpn.last_tick) < NRPN_MIN_GAP_TICKS)
-            return;
-
         g_nrpn.msb = value & 0x7F;
         g_nrpn.active = 1;
         g_nrpn.last_tick = now;
@@ -285,7 +293,6 @@ void nrpn_handle(int channel, int cc, int value)
             nrpn_dispatch(id, value & 0x7F);
 
         nrpn_tx_reset();
-        return;
     }
 }
 

@@ -16,6 +16,13 @@
 #define RANDOMIZER_UNDO_SLOTS           16
 #define RANDOMIZER_MAX_EU_SLOTS_PER_CH  4
 
+/* ========= STEP REPEATER ENGINE-STATE =========
+   - Engine-only state (NOT in ft_step_t)
+   - Default is 1 (normal)
+*/
+#define STEP_REPEAT_MIN 1
+#define STEP_REPEAT_MAX 8
+
 /* ========= EUCLID MODES ========= */
 typedef enum {
     EU_MODE_OFF = 0,
@@ -64,6 +71,10 @@ void randomizer_set_freeze(int en);
 void randomizer_set_section(int s);
 int  randomizer_get_section(void);
 int  randomizer_get_variation(void);
+
+/* Step Repeater (engine state) */
+void randomizer_set_step_repeat(int part, int step, int repeat); /* 1..8 */
+int  randomizer_get_step_repeat(int part, int step);             /* 1..8 */
 
 /* Motion lanes */
 int randomizer_create_motion_lane(int id, int length);
