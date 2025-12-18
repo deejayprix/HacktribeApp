@@ -1,130 +1,92 @@
 #include "groove_engine.h"
-#include <string.h>
 
 /* ============================================================
    INTERNAL STATE
    ============================================================ */
 
-typedef struct {
-    uint8_t enabled;         /* 0/1 */
-    uint8_t macro;           /* 0..127 */
+typedef struct
+{
+    uint8_t enabled;
 
-    /* “locked defaults” – used by apply_* paths */
-    uint8_t timing_amount;   /* 0..127 */
-    uint8_t velocity_amount; /* 0..127 */
+    uint8_t macro;
+
+    uint8_t timing_curve;
+    uint8_t velocity_curve;
+
+    uint8_t timing_amount;     /* 0..127 */
+    uint8_t velocity_amount;   /* 0..127 */
+
 } groove_state_t;
 
 static groove_state_t g_groove;
 
 /* ============================================================
-   INTERNAL HELPERS
+   CURVE SHAPES (signed, centered)
    ============================================================ */
 
-static inline uint8_t clamp_u7(int v)
+static int16_t curve_linear(uint8_t p)
 {
-    if (v < 0)   return 0;
-    if (v > 127) return 127;
-    return (uint8_t)v;
+    return (int16_t)p - 64;
 }
 
-static inline int clampi(int v, int lo, int hi)
+static int16_t curve_swing(uint8_t p)
 {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
+    int16_t x = (int16_t)p - 64;
+    return (x * x) / 64 * (x < 0 ? -1 : 1);
 }
 
-/* Pattern weighting (Phase 3.2.3.4) */
-static uint8_t groove_pattern_weight(int step)
+static int16_t curve_push(uint8_t p)
 {
-    /* Stronger on downbeats */
-    int s = step & 15;
-    if (s == 0) return 127;
-    if (s == 8) return 108;
-    if ((s & 3) == 0) return 92;
-    return 72;
-}
-
-/* Global “lock”: if disabled OR macro==0 => NO-OP */
-static inline int groove_is_active(void)
-{
-    return (g_groove.enabled && g_groove.macro > 0) ? 1 : 0;
-}
-
-/* Macro-scaled amount (0..127), safe: macro==0 => 0 */
-static inline int apply_macro_amount(uint8_t amount)
-{
-    /* (amount * macro) / 127 */
-    return ((int)amount * (int)g_groove.macro) / 127;
+    int16_t x = (int16_t)p - 64;
+    return x > 0 ? (x * 2) : x;
 }
 
 /* ============================================================
-   INIT / ENABLE
+   PUBLIC API
    ============================================================ */
 
 void groove_init(void)
 {
-    memset(&g_groove, 0, sizeof(g_groove));
-
-    /* Final defaults (Phase 3.2.3.13.4):
-       - enabled: ON by default is okay, but macro 0 keeps it effectively off
-       - macro: 0 => no change until user turns it up
-       - timing/velocity amounts: moderate defaults, still gated by macro
-    */
     g_groove.enabled = 1;
+
     g_groove.macro = 0;
 
-    g_groove.timing_amount = 64;    /* “centered” strength */
+    g_groove.timing_curve   = 0;
+    g_groove.velocity_curve = 0;
+
+    g_groove.timing_amount   = 64;
     g_groove.velocity_amount = 64;
 }
 
-void groove_set_enabled(uint8_t en)
+/* ------------------------------------------------------------ */
+
+void groove_set_enabled(uint8_t on)
 {
-    g_groove.enabled = en ? 1 : 0;
+    g_groove.enabled = on ? 1 : 0;
 }
 
-uint8_t groove_get_enabled(void)
+uint8_t groove_is_enabled(void)
 {
     return g_groove.enabled;
 }
 
-/* ============================================================
-   AMOUNTS (micro-timing + velocity swing)
-   ============================================================ */
+/* ------------------------------------------------------------
+   Macro
+   ------------------------------------------------------------ */
 
-void groove_set_timing_amount(uint8_t v)
+void groove_set_macro(uint8_t value)
 {
-    g_groove.timing_amount = clamp_u7((int)v);
-}
+    g_groove.macro = value & 0x7F;
 
-void groove_set_velocity_amount(uint8_t v)
-{
-    g_groove.velocity_amount = clamp_u7((int)v);
-}
+    /* deterministic mapping */
+    g_groove.timing_curve =
+        (value < 42) ? 0 : (value < 85) ? 1 : 2;
 
-uint8_t groove_get_timing_amount(void)
-{
-    return g_groove.timing_amount;
-}
+    g_groove.velocity_curve =
+        (value < 64) ? 0 : 1;
 
-uint8_t groove_get_velocity_amount(void)
-{
-    return g_groove.velocity_amount;
-}
-
-/* ============================================================
-   MACRO / CURVE ENTRY (alias)
-   ============================================================ */
-
-void groove_set_macro(uint8_t v)
-{
-    g_groove.macro = clamp_u7((int)v);
-}
-
-/* Router compatibility (older naming) */
-void groove_set_curve(uint8_t v)
-{
-    groove_set_macro(v);
+    g_groove.timing_amount   = value;
+    g_groove.velocity_amount = value;
 }
 
 uint8_t groove_get_macro(void)
@@ -132,73 +94,69 @@ uint8_t groove_get_macro(void)
     return g_groove.macro;
 }
 
-/* ============================================================
-   CURVES (base)
-   ============================================================ */
+/* ------------------------------------------------------------
+   Curve select
+   ------------------------------------------------------------ */
 
-int groove_get_timing_curve(int step)
+void groove_set_timing_curve(uint8_t curve)
 {
-    /* Simple “odd-step late” swing base */
-    return (step & 1) ? 2 : 0;
+    g_groove.timing_curve = curve;
 }
 
-int groove_get_velocity_curve(int step)
+void groove_set_velocity_curve(uint8_t curve)
 {
-    /* Slightly softer on off-beats */
-    return (step & 1) ? -8 : 0;
+    g_groove.velocity_curve = curve;
 }
 
-/* ============================================================
-   SHAPE HELPERS (phase 0..127)
-   ============================================================ */
+/* ------------------------------------------------------------
+   Amount
+   ------------------------------------------------------------ */
 
-int groove_curve_timing_shape(int phase)
+void groove_set_timing_amount(uint8_t amt)
 {
-    /* signed, small range */
-    int p = clampi(phase, 0, 127);
-    return (p - 64) / 16; /* approx -4..+3 */
+    g_groove.timing_amount = amt & 0x7F;
 }
 
-int groove_curve_velocity_shape(int phase)
+void groove_set_velocity_amount(uint8_t amt)
 {
-    int p = clampi(phase, 0, 127);
-    return (p - 64) / 8;  /* approx -8..+7 */
+    g_groove.velocity_amount = amt & 0x7F;
 }
 
-/* ============================================================
-   APPLY (pattern-aware + macro + amounts)
-   ============================================================ */
+/* ------------------------------------------------------------
+   Evaluation
+   ------------------------------------------------------------ */
 
-int groove_apply_timing(int step, int curve_val)
+int16_t groove_curve_timing_shape(uint8_t phase)
 {
-    if (!groove_is_active())
+    if (!g_groove.enabled)
         return 0;
 
-    /* amount after macro scaling */
-    int amt = apply_macro_amount(g_groove.timing_amount); /* 0..127 */
-    if (amt <= 0)
-        return 0;
+    int16_t shape;
 
-    /* scale curve_val by amount (amt/127) */
-    int v = (curve_val * amt) / 127;
+    switch (g_groove.timing_curve)
+    {
+        default:
+        case 0: shape = curve_linear(phase); break;
+        case 1: shape = curve_swing(phase);  break;
+        case 2: shape = curve_push(phase);   break;
+    }
 
-    /* pattern weight */
-    v = (v * (int)groove_pattern_weight(step)) / 127;
-
-    return v;
+    return (shape * g_groove.timing_amount) / 127;
 }
 
-int groove_apply_velocity(int step, int curve_val)
+int16_t groove_curve_velocity_shape(uint8_t phase)
 {
-    if (!groove_is_active())
+    if (!g_groove.enabled)
         return 0;
 
-    int amt = apply_macro_amount(g_groove.velocity_amount);
-    if (amt <= 0)
-        return 0;
+    int16_t shape;
 
-    int v = (curve_val * amt) / 127;
-    v = (v * (int)groove_pattern_weight(step)) / 127;
+    switch (g_groove.velocity_curve)
+    {
+        default:
+        case 0: shape = curve_linear(phase); break;
+        case 1: shape = curve_swing(phase);  break;
+    }
 
-    return v;
+    return (shape * g_groove.velocity_amount) / 127;
 }
