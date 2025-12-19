@@ -1,7 +1,7 @@
 /* ============================================================
    apps/autorecorder/nrpn_router.c   (vollständig)
    + 3.2.3.13.4 – Final Defaults & Phase-3-Lock
-   NRPN: MSB 51 / LSB 3,4,20,21
+   + 3.5.0.1    – Composer-NRPN-Mapping (MSB 52)
    ============================================================ */
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +19,8 @@
 #include "scale_engine.h"
 #include "composer.h"
 #include "groove_engine.h"
+#include "composer_preview.h"
+
 
 /* ============================================================
    NRPN TRANSACTION GUARD
@@ -44,6 +46,11 @@ static nrpn_tx_state_t g_nrpn = {
 /* Condition staging */
 static int g_cond_part = 0;
 static int g_cond_step = 0;
+
+/* Composer staging (3.5.0.1) */
+static uint8_t g_cmp_section   = 0;   /* 0..4 */
+static uint8_t g_cmp_segment   = 0;   /* 0..3 */
+static uint8_t g_cmp_startpage = 0;   /* 0..127 */
 
 /* ============================================================
    INTERNAL HELPERS
@@ -71,6 +78,13 @@ static inline uint16_t nrpn_build_id(void)
         return 0xFFFF;
 
     return (uint16_t)((g_nrpn.msb << 7) | g_nrpn.lsb);
+}
+
+static inline uint8_t clamp_u8(int v, int lo, int hi)
+{
+    if (v < lo) return (uint8_t)lo;
+    if (v > hi) return (uint8_t)hi;
+    return (uint8_t)v;
 }
 
 /* ============================================================
@@ -235,6 +249,74 @@ static void nrpn_dispatch(uint16_t nrpn, int value)
         }
         return;
     }
+
+/* --------------------------------------------------------
+   MSB 52 — Composer Engine
+   -------------------------------------------------------- */
+if (msb == 52)
+{
+    static uint8_t c_section = SECTION_MAIN;
+    static uint8_t c_segment = 0;
+
+    switch (lsb)
+    {
+        case 0: /* Genre */
+            composer_set_genre(value);
+            return;
+
+        case 1: /* Section */
+            if (value <= SECTION_OUTRO)
+                c_section = (composer_section_t)value;
+            return;
+
+        case 2: /* Segment */
+            c_segment = value & 0x03;
+            return;
+
+        case 10: /* Generate Segment */
+            if (value == 1)
+                composer_generate_segment(
+                    composer_get_genre(),
+                    c_section,
+                    c_segment,
+                    pattern_get_active_page()
+                );
+            return;
+
+        case 11: /* Generate Section */
+            if (value == 1)
+                composer_generate_section(
+                    composer_get_genre(),
+                    c_section,
+                    pattern_get_active_page()
+                );
+            return;
+
+        case 12: /* Generate Song */
+            if (value == 1)
+                composer_generate_song(
+                    composer_get_genre(),
+                    pattern_get_active_page()
+                );
+            return;
+
+        case 20: /* Preset Recall (Policy only) */
+            if (value == 1)
+                composer_preset_recall(
+                    composer_get_genre(),
+                    c_section,
+                    c_segment
+                );
+            return;
+
+        case 30: composer_preview_enable(value); return;
+        case 31: if (value == 1) composer_preview_reset(); return;
+        case 32: composer_preview_set_bar(value); return;
+
+
+    }
+    return;
+}
 }
 
 /* ============================================================

@@ -28,11 +28,13 @@ SRCS := \
     condition_presets.c \
     euclid_nrpn_stubs.c \
     pattern_write_dummy.c \
+    composer_timeline.c \
     composer_padmap.c \
     composer_policy.c \
     composer.c \
     composer_utils.c \
     composer_bridge.c \
+    composer_preview.c \
     groove_engine.c \
     cpu/save_manager_stubs.c \
     cpu/startup.s \

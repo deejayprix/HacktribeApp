@@ -1,52 +1,49 @@
 #include "composer_bridge.h"
 #include "composer_utils.h"
+#include "randomizer.h"
 
-/*
- Phase 2 – Step 11
- ------------------------------------------------------------
- - KEINE Noten-Generierung
- - KEIN Step-/RAM-Zugriff
- - KEIN direkter Randomizer-Call
- - Composer = Policy / Entscheidungsebene
- - Engines reagieren später (NRPN / SongMode / User Trigger)
- ------------------------------------------------------------
-*/
-
-/*
- Decide which parts SHOULD be generated.
- Actual generation is handled elsewhere.
-*/
-void composer_fill_missing_parts(uint8_t page)
+/* ------------------------------------------------------------
+   DEFAULT LOCK BEHAVIOR
+   If you have a real lock system, replace this implementation.
+   ------------------------------------------------------------ */
+int composer_part_is_locked(uint8_t part, composer_section_t section)
 {
-    (void)page; /* Page-Info wird ab Phase 3 relevant */
+    (void)part;
+    (void)section;
+    return 0; /* default: nothing locked */
+}
 
-    for (uint8_t part = 0; part < 16; part++)
+/* ------------------------------------------------------------
+   Composer triggers generation decisions.
+   Randomizer generates (only if empty).
+   ------------------------------------------------------------ */
+void composer_fill_missing_parts(uint8_t target_page,
+                                 composer_section_t section,
+                                 uint8_t segment)
+{
+    (void)target_page; /* keep for later: page-aware in_use checks */
+
+    composer_partmask_t want = composer_decide_partmask(section, segment);
+
+    for (uint8_t part = 0; part < 16; ++part)
     {
-        if (!composer_part_should_be_generated(part))
+        if (!composer_mask_has_part(want, part))
             continue;
 
-        /*
-         Phase 2:
-         --------------------------------------------
-         KEINE Aktion hier.
+        if (composer_part_is_locked(part, section))
+            continue;
 
-         - Kein randomize_generate_pattern()
-         - Kein scale_engine_generate_part()
-         - Kein pattern_write()
-         - Kein RAM-Zugriff
+        /* IMPORTANT: Randomizer decides emptiness */
+        if (randomizer_part_in_use(part))
+            continue;
 
-         Composer setzt NUR:
-         - Genre
-         - Section
-         - Density
-         - Variation
-         - Fill-Type
-
-         Die eigentliche Pattern-Erzeugung passiert über:
-         - bestehende Randomizer-Trigger
-         - NRPN
-         - SongMode
-         - User Action
+        /* Trigger generation for this part.
+           Keep it minimal: generate one pattern page for this part.
+           steps_count: usually 64 on electribe-style patterns.
         */
+        (void)randomize_and_write_pattern_paged(part, 64, (int)section, (int)target_page);
+
+        /* After writing, randomizer_part_in_use() should become true
+           (either via your in-use scan OR via a usage-bit update). */
     }
 }

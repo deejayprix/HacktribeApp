@@ -64,39 +64,26 @@ void composer_preset_recall(uint8_t genre_id,
 
 /* ------------------------------------------------------------
    Option 3: Song Mode Hook
-   - reacts to section changes
-   - triggers fill behaviour (performance-layer only)
    ------------------------------------------------------------ */
 
 void composer_songmode_on_section(uint8_t section, uint8_t segment)
 {
-    /* Apply policy:
-       - density
-       - variation
-       - euclid parameters
-       - humanize
-       - fill-state
-    */
     composer_apply_policy(composer_get_genre(),
                           (composer_section_t)section,
                           (uint8_t)segment);
 
-    /* Translate fill type into Live FX behaviour */
     switch (composer_get_current_fill())
     {
         case FILL_GROOVE:
-            /* subtle energy lift */
             live_fx_set_variation_boost(20);
             break;
 
         case FILL_BUILD:
-            /* strong rise + fill */
             live_fx_set_variation_boost(40);
             live_fx_trigger_fill_now();
             break;
 
         case FILL_PUNCTUATION:
-            /* short accent fill */
             live_fx_set_variation_boost(30);
             live_fx_trigger_fill_now();
             break;
@@ -108,14 +95,13 @@ void composer_songmode_on_section(uint8_t section, uint8_t segment)
 }
 
 /* ------------------------------------------------------------
-   Pattern Generation (Policy-driven, safe)
+   Pattern Generation
    ------------------------------------------------------------ */
 
 #define BARS_PER_PATTERN 4
 #define STEPS_PER_BAR    16
 #define SEG_STEPS        (BARS_PER_PATTERN * STEPS_PER_BAR)
 
-/* Write a guaranteed-empty 4-bar pattern page */
 static void write_empty_pattern(uint8_t part, uint8_t page)
 {
     ft_step_t steps[SEG_STEPS];
@@ -139,23 +125,21 @@ void composer_generate_segment(uint8_t genre_id,
                                uint8_t segment,
                                uint8_t target_page)
 {
-    /* Base: blank page for all parts */
     for (uint8_t part = 0; part < 16; part++)
         write_empty_pattern(part, target_page);
 
-    /* Apply policy (no notes yet) */
     composer_preset_recall(genre_id, section, segment);
 
-    /* STEP 11:
-       Fill ONLY missing parts
-       - never overwrites user/DAW content
-       - safe, idempotent
-    */
-    composer_fill_missing_parts(target_page);
+    /* ✅ FIX: neue Signatur */
+    composer_fill_missing_parts(
+        target_page,
+        section,
+        segment
+    );
 }
 
 /* ------------------------------------------------------------
-   Generate ONE section (Intro, Main, Break, Peak, Outro)
+   Generate ONE section
    ------------------------------------------------------------ */
 
 void composer_generate_section(uint8_t genre_id,
@@ -173,7 +157,7 @@ void composer_generate_section(uint8_t genre_id,
 }
 
 /* ------------------------------------------------------------
-   Generate FULL song structure
+   Generate FULL song
    ------------------------------------------------------------ */
 
 void composer_generate_song(uint8_t genre_id,
