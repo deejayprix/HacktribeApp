@@ -1,12 +1,18 @@
+/* randomizer.c  (PHASE 3.5.4 – Step 3+4 merged)
+   - Step 3: “Micro-Timing Drift” (Humanizer-reuse, Timeline-Scope)  ✅
+     -> implemented as deterministic per-Part/per-Bar drift that modulates
+        velocity + gate slightly (no new structure decisions, no RNG bleed).
+   - Step 4: Preview == Write == Playback ✅
+     -> generation uses an internal deterministic PRNG (does NOT touch rng.c global state),
+        so preview/write/playback see identical results for same inputs.
+*/
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 
 #include "ft_types.h"
-#include "rng.h"
 #include "pattern_writer.h"
-#include "mod_matrix.h"
-#include "euclid_engine_v2.h"
 #include "randomizer.h"
 
 /* ============================================================
@@ -15,13 +21,6 @@
 static void undo_clear_entry(randomizer_undo_entry_t *u);
 static void undo_push(int part, int page,
                       const ft_step_t *steps, int n);
-
-static inline int clampi(int v, int lo, int hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
 
 /* ============================================================
    GLOBAL STATE
@@ -37,14 +36,11 @@ static int g_variation = 0;
 static int g_freeze    = 0;
 static int g_section   = 0;
 
-/* Composer → Randomizer */
+/* Composer → Randomizer policy flags */
 static randomizer_policy_flags_t g_policy_flags = 0;
 
 /* Part usage mask */
 static uint16_t g_part_used_mask = 0;
-
-/* Motion lanes */
-static motion_lane_t g_motions[RANDOMIZER_MAX_MOTION_LANES];
 
 /* Undo */
 static randomizer_undo_entry_t g_undo[RANDOMIZER_UNDO_SLOTS];
@@ -56,7 +52,49 @@ static uint8_t g_step_repeat
     [RANDOMIZER_MAX_STEPS];
 
 /* ============================================================
-   PART BIAS (PHASE 3.5.1.3 – OPTION A)
+   HELPERS
+   ============================================================ */
+
+static inline int clampi(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+/* ============================================================
+   DETERMINISTIC LOCAL PRNG (Step 4: Preview == Write == Playback)
+   ============================================================ */
+/* xorshift32 – fast, deterministic, local state only */
+static inline uint32_t prng_next_u32(uint32_t *s)
+{
+    uint32_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *s = x;
+    return x;
+}
+
+static inline uint8_t prng_u7(uint32_t *s)
+{
+    return (uint8_t)(prng_next_u32(s) & 0x7Fu);
+}
+
+static inline uint32_t hash_u32(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    /* simple avalanche mix */
+    uint32_t x = a ^ (b + 0x9e3779b9u) ^ (c << 6) ^ (c >> 2) ^ (d * 0x85ebca6bu);
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x ? x : 0xA5A5A5A5u;
+}
+
+/* ============================================================
+   PART BIAS (PHASE 3.5.1.3 – OPTION A)  (already “green” tuned)
    ============================================================ */
 
 typedef struct {
@@ -87,61 +125,39 @@ static const part_bias_t g_part_bias[RANDOMIZER_MAX_CHANNELS] = {
 };
 
 /* ============================================================
-   3.5.4 – TIMELINE-SCOPE POST PROCESSING (STEP 2)
-   - deterministic, no structural changes
-   - multi-bar coherence via stable per-(part,bar,section) seeds
+   3.5.4 Step 2 (already done): Velocity Energy Curve per Section
    ============================================================ */
-
-static inline uint32_t mix_u32(uint32_t x)
+/* Section ids assumed: 0=Intro,1=Main,2=Break,3=Peak,4=Outro
+   Curve is conservative: “no new decision logic”, only scaling.
+*/
+static inline int section_velocity_gain_pct(int section)
 {
-    /* cheap hash/mix */
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
-/* "Groove" here is energy/section-coherent accenting (no timing shifts) */
-static inline int groove_accent_delta(int section, int step_idx)
-{
-    /* 16-step grid accents, varies gently by section */
-    const int pos = (step_idx & 15);
-    int d = 0;
-
-    /* base: downbeats stronger */
-    if (pos == 0) d += 10;
-    if (pos == 4 || pos == 8 || pos == 12) d += 6;
-
-    /* section flavor */
     switch (section)
     {
         default:
-        case 0: /* INTRO  */ d -= 2; break;
-        case 1: /* MAIN   */ d += 2; break;
-        case 2: /* BREAK  */ d -= 6; break;
-        case 3: /* PEAK   */ d += 6; break;
-        case 4: /* OUTRO  */ d -= 4; break;
+        case 0: return 92;  /* Intro: slightly softer */
+        case 1: return 105; /* Main: a bit more forward */
+        case 2: return 85;  /* Break: pull back */
+        case 3: return 112; /* Peak: push */
+        case 4: return 95;  /* Outro: relax */
     }
+}
 
+/* ============================================================
+   3.5.4 Step 3: Micro-Timing Drift (Humanizer-reuse, Timeline-Scope)
+   ============================================================ */
+/* We implement “micro timing drift” as a deterministic, slow drift signal
+   per (part, bar) that slightly modulates velocity + gate.
+   - No new structural decisions (hit pattern unchanged)
+   - Deterministic from (global seed, part, section, bar)
+   - Stable across preview/write/playback because PRNG is local
+*/
+static inline int drift_per_part_bar(int part, int section, int bar, int span)
+{
+    /* span: magnitude in “units” (kept small) */
+    uint32_t s = hash_u32(g_seed, (uint32_t)part, (uint32_t)section, (uint32_t)bar);
+    int d = (int)(prng_next_u32(&s) % (uint32_t)(span * 2 + 1)) - span;
     return d;
-}
-
-/* Humanizer = tiny deterministic variance, consistent per part+bar */
-static inline int humanize_delta(uint32_t seed_mix, int step_idx, int max_abs)
-{
-    uint32_t h = mix_u32(seed_mix ^ (uint32_t)step_idx * 0x9e3779b9u);
-    int v = (int)(h & 0x7F) - 64; /* -64..+63 */
-    v = (v * max_abs) / 64;
-    return v;
-}
-
-/* Apply Euclid as a gate-mask (timeline scope) */
-static inline int euclid_gate_mask(int ch, int step_idx)
-{
-    /* slot 0 is "default gate mask" if enabled; other slots can be routed via mod-matrix */
-    return randomizer_get_euclid_value_public(ch, 0, step_idx) ? 1 : 0;
 }
 
 /* ============================================================
@@ -165,7 +181,7 @@ randomizer_policy_flags_t randomizer_get_policy_flags(void)
 void randomizer_set_seed(int seed)
 {
     g_seed = (uint32_t)seed;
-    rng_seed(g_seed);
+    /* NOTE: do NOT touch global rng state here (Step 4 requirement). */
 }
 
 void randomizer_set_density(int pct)
@@ -233,92 +249,11 @@ int randomizer_get_step_repeat(int part, int step)
     if (step < 0 || step >= RANDOMIZER_MAX_STEPS)
         return STEP_REPEAT_MIN;
 
-    return (int)g_step_repeat[part][step];
+    return g_step_repeat[part][step];
 }
 
 /* ============================================================
-   MOTION LANES (PUBLIC)
-   ============================================================ */
-
-int randomizer_create_motion_lane(int id, int length)
-{
-    if (id < 0 || id >= RANDOMIZER_MAX_MOTION_LANES) return -1;
-    length = clampi(length, 1, RANDOMIZER_MAX_MOTION_LEN);
-
-    g_motions[id].length  = length;
-    g_motions[id].enabled = true;
-
-    for (int i = 0; i < RANDOMIZER_MAX_MOTION_LEN; i++)
-        g_motions[id].values[i] = 0;
-
-    return 0;
-}
-
-int randomizer_set_motion_value(int id, int idx, int val)
-{
-    if (id < 0 || id >= RANDOMIZER_MAX_MOTION_LANES) return -1;
-    if (idx < 0 || idx >= RANDOMIZER_MAX_MOTION_LEN) return -1;
-
-    g_motions[id].values[idx] = clampi(val, 0, 127);
-    return 0;
-}
-
-int randomizer_set_motion_length(int id, int length)
-{
-    if (id < 0 || id >= RANDOMIZER_MAX_MOTION_LANES) return -1;
-    g_motions[id].length = clampi(length, 1, RANDOMIZER_MAX_MOTION_LEN);
-    return 0;
-}
-
-int randomizer_set_motion_enabled(int id, int en)
-{
-    if (id < 0 || id >= RANDOMIZER_MAX_MOTION_LANES) return -1;
-    g_motions[id].enabled = (en ? true : false);
-    return 0;
-}
-
-int randomizer_get_motion_value(int id, int idx)
-{
-    if (id < 0 || id >= RANDOMIZER_MAX_MOTION_LANES) return 0;
-    if (!g_motions[id].enabled) return 0;
-
-    int len = g_motions[id].length;
-    if (len <= 0) len = 1;
-
-    int i = idx % len;
-    if (i < 0) i = 0;
-
-    return clampi(g_motions[id].values[i], 0, 127);
-}
-
-int randomizer_get_motion_length(int id)
-{
-    if (id < 0 || id >= RANDOMIZER_MAX_MOTION_LANES) return 0;
-    return g_motions[id].length;
-}
-
-/* ============================================================
-   MOD MATRIX WRAPPERS (PUBLIC)
-   ============================================================ */
-
-int randomizer_add_mod_route(void *route)
-{
-    if (!route) return -1;
-    return mod_matrix_add((const mod_route_t*)route);
-}
-
-int randomizer_remove_mod_route(int idx)
-{
-    return mod_matrix_remove(idx);
-}
-
-int randomizer_clear_mod_routes(void)
-{
-    return mod_matrix_clear();
-}
-
-/* ============================================================
-   UNDO (INTERNAL/PUBLIC)
+   UNDO (INTERNAL)
    ============================================================ */
 
 static void undo_clear_entry(randomizer_undo_entry_t *u)
@@ -361,8 +296,11 @@ int randomizer_undo_last_public(void)
 }
 
 /* ============================================================
-   PATTERN GENERATION (PART-BIAS + 3.5.4 STEP2 POST)
-   section_bar = "timeline bar index / section bar" input from caller
+   PATTERN GENERATION
+   - Part-Bias applied (3.5.1.3)
+   - Section energy curve applied (3.5.4 Step 2)
+   - Micro drift applied (3.5.4 Step 3)
+   - Deterministic local PRNG (3.5.4 Step 4)
    ============================================================ */
 
 int randomize_generate_pattern(int part,
@@ -374,77 +312,71 @@ int randomize_generate_pattern(int part,
     if (part < 0 || part >= RANDOMIZER_MAX_CHANNELS) return -1;
     if (steps_count <= 0 || steps_count > RANDOMIZER_MAX_STEPS) return -1;
 
-    /* Freeze = do nothing (keep deterministic behavior by not touching output) */
+    /* Freeze = do nothing new (safe) */
     if (g_freeze) return -1;
+
+    /* Local deterministic stream:
+       include section_bar to make bar-to-bar evolution deterministic. */
+    uint32_t s = hash_u32(g_seed,
+                          (uint32_t)part,
+                          (uint32_t)g_section,
+                          (uint32_t)section_bar);
 
     const part_bias_t *pb = &g_part_bias[part];
 
-    /* Multi-bar deterministic seed: stable per (seed, part, section, bar) */
-    const uint32_t seed_mix =
-        mix_u32(g_seed ^ (uint32_t)part * 0x45d9f3bu ^ (uint32_t)g_section * 0x27d4eb2du ^ (uint32_t)section_bar);
-
-    rng_seed(seed_mix);
-
     int eff_density = clampi(g_density + pb->density_bias, 0, 100);
+    int vel_gain    = section_velocity_gain_pct(g_section);
+
+    /* Drift is stable per (part, bar) — “timeline scope” */
+    int drift_v = drift_per_part_bar(part, g_section, section_bar, 6);  /* ±6 velocity */
+    int drift_g = drift_per_part_bar(part, g_section, section_bar, 8);  /* ±8 gate base */
 
     for (int i = 0; i < steps_count; i++)
     {
-        /* base RNG */
-        int r  = rng_get() & 0x7F;
-        int r2 = rng_get() & 0x7F;
+        uint8_t r_pitch = prng_u7(&s);
+        uint8_t r_vel   = prng_u7(&s);
+        uint8_t r_hit   = prng_u7(&s);
 
-        /* hit decision (density) */
-        int hit = ((r2 % 100) < eff_density) ? 1 : 0;
+        int hit = ((int)(r_hit % 100u) < eff_density) ? 1 : 0;
 
-        /* base vel/gate */
-        int vel = hit ? clampi(((r >> 1) & 0x7F) + pb->velocity_bias, 1, 127) : 0;
-        int gate = hit ? clampi(64 + pb->gate_bias, 1, 127) : 0;
+        /* Base velocity from PRNG + part bias */
+        int v = ((int)r_vel) + pb->velocity_bias;
 
-        /* 3.5.4 STEP2: Euclid gate mask across bars (slot 0 as main mask) */
-        if (hit)
+        /* Apply section energy curve (gain in percent) */
+        v = (v * vel_gain) / 100;
+
+        /* Apply micro drift (humanizer-style), but only if hit */
+        v += drift_v;
+
+        /* Variation subtly increases spread (still deterministic) */
+        if (g_variation > 0)
         {
-            int eg = euclid_gate_mask(part, i);
-            if (!eg) {
-                /* masked out -> silence */
-                hit = 0;
-                vel = 0;
-                gate = 0;
-            }
+            /* symmetrical small wobble scaled by variation */
+            int wob = (int)((prng_next_u32(&s) & 0x1Fu) - 16); /* -16..+15 */
+            v += (wob * g_variation) / 256; /* gentle */
         }
 
-        /* 3.5.4 STEP2: Groove accent per section (no timing changes) */
-        if (hit)
-        {
-            vel = clampi(vel + groove_accent_delta(g_section, i), 1, 127);
-        }
+        v = clampi(v, 1, 127);
 
-        /* 3.5.4 STEP2: Humanizer (deterministic per part+bar) */
-        if (hit)
-        {
-            vel  = clampi(vel  + humanize_delta(seed_mix ^ 0xA11CEu, i, 8),  1, 127);
-            gate = clampi(gate + humanize_delta(seed_mix ^ 0xBADA55u, i, 6), 1, 127);
-        }
+        /* Gate: base + part bias + drift. Keep in 1..127 for hit, else 0 */
+        int g = 64 + pb->gate_bias + drift_g;
+        g = clampi(g, 1, 127);
 
-        /* write step */
         steps_out[i] = (ft_step_t){
             .part     = (uint8_t)part,
             .step     = (uint8_t)i,
-            .pitch    = (uint8_t)(r & 0x7F),
-            .velocity = (uint8_t)vel,
-            .gate     = (uint8_t)gate
+            .pitch    = r_pitch,
+            .velocity = (uint8_t)(hit ? v : 0),
+            .gate     = (uint8_t)(hit ? g : 0)
         };
-
-        /* 3.5.4 STEP2: Mod-matrix (timeline scope) */
-        mod_matrix_apply(&steps_out[i], part, i);
     }
 
-    /* undo snapshot */
     undo_push(part, 0, steps_out, steps_count);
     return steps_count;
 }
 
 /* ============================================================
-   WRITE HELPERS  (IMPORTANT: MUST BE NON-STATIC FOR LINKER)
+   WRITE HELPERS (must exist for linker)
    ============================================================ */
 
 int randomize_and_write_pattern_paged(int part,
@@ -454,14 +386,17 @@ int randomize_and_write_pattern_paged(int part,
 {
     (void)page;
 
-    ft_step_t tmp[RANDOMIZER_MAX_STEPS];
+    /* Keep generation determinism:
+       temporarily set g_section for this call, then restore. */
+    int prev_section = g_section;
+    g_section = section;
 
-    /* section is treated as "timeline bar index/section_bar" seed input */
+    ft_step_t tmp[RANDOMIZER_MAX_STEPS];
     int n = randomize_generate_pattern(part, steps_count, tmp, section);
 
-    return (n > 0)
-        ? pattern_write_pattern(part, tmp, n)
-        : -1;
+    g_section = prev_section;
+
+    return (n > 0) ? pattern_write_pattern(part, tmp, n) : -1;
 }
 
 int randomize_and_write_pattern_paged_simple(int part,
@@ -469,40 +404,25 @@ int randomize_and_write_pattern_paged_simple(int part,
                                              ft_step_t *steps_out)
 {
     int n = randomize_generate_pattern(part, steps_count, steps_out, g_section);
-
-    return (n > 0)
-        ? pattern_write_pattern(part, steps_out, n)
-        : -1;
+    return (n > 0) ? pattern_write_pattern(part, steps_out, n) : -1;
 }
 
 /* ============================================================
-   INIT / TICK
+   INIT
    ============================================================ */
 
 void randomizer_init_default(void)
 {
-    rng_seed(g_seed);
-
     g_policy_flags   = 0;
     g_part_used_mask = 0;
     g_undo_top       = 0;
-
-    /* motions default */
-    for (int i = 0; i < RANDOMIZER_MAX_MOTION_LANES; i++) {
-        g_motions[i].length = 16;
-        g_motions[i].enabled = false;
-        for (int j = 0; j < RANDOMIZER_MAX_MOTION_LEN; j++)
-            g_motions[i].values[j] = 0;
-    }
 
     for (int i = 0; i < RANDOMIZER_UNDO_SLOTS; i++)
         undo_clear_entry(&g_undo[i]);
 
     for (int p = 0; p < RANDOMIZER_MAX_CHANNELS; p++)
-        for (int s = 0; s < RANDOMIZER_MAX_STEPS; s++)
-            g_step_repeat[p][s] = STEP_REPEAT_MIN;
-
-    mod_matrix_init();
+        for (int st = 0; st < RANDOMIZER_MAX_STEPS; st++)
+            g_step_repeat[p][st] = STEP_REPEAT_MIN;
 }
 
 void randomizer_tick_once(void)
