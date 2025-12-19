@@ -36,6 +36,7 @@ SRCS := \
     composer_bridge.c \
     composer_preview.c \
     composer_write_prepare.c \
+    composer_write_export.c \
     groove_engine.c \
     cpu/save_manager_stubs.c \
     cpu/startup.s \

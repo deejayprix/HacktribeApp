@@ -1,78 +1,72 @@
 #include "composer_write_prepare.h"
-#include "composer_timeline.h"
+#include "pattern_writer.h"
 #include <string.h>
 
-/* ============================================================
-   INTERNAL STATE
-   ============================================================ */
+#define MAX_WRITE_BLOCKS 250
 
-static composer_write_entry_t g_entries[COMPOSER_MAX_PATTERN_SLOTS];
-static uint16_t g_entry_count = 0;
+static composer_write_block_t g_blocks[MAX_WRITE_BLOCKS];
+static int g_block_count = 0;
 
-/* ============================================================
-   RESET
-   ============================================================ */
-
-void composer_write_prepare_reset(void)
+int composer_write_prepare(uint16_t slot_base)
 {
-    memset(g_entries, 0, sizeof(g_entries));
-    g_entry_count = 0;
-}
-
-/* ============================================================
-   BUILD WRITE MAP
-   ============================================================ */
-
-int composer_write_prepare_build(uint16_t first_slot)
-{
-    composer_write_prepare_reset();
-
-    if (first_slot == 0)
-        first_slot = 1;
+    g_block_count = 0;
 
     uint16_t total_bars = composer_timeline_get_total_bars();
-    uint16_t bar = 0;
-    uint16_t slot = first_slot;
-
-    while (bar < total_bars &&
-           g_entry_count < COMPOSER_MAX_PATTERN_SLOTS &&
-           slot <= COMPOSER_MAX_PATTERN_SLOTS)
-    {
-        composer_section_t section =
-            composer_timeline_get_section_at_bar(bar);
-
-        uint8_t segment =
-            composer_timeline_get_segment_at_bar(bar);
-
-        composer_write_entry_t *e = &g_entries[g_entry_count++];
-
-        e->slot      = slot;
-        e->bar_start = bar;
-        e->section   = section;
-        e->segment   = segment;
-
-        /* advance exactly 4 bars */
-        bar  += COMPOSER_PATTERN_BARS;
-        slot += 1;
-    }
-
-    return g_entry_count;
-}
-
-/* ============================================================
-   QUERY
-   ============================================================ */
-
-uint16_t composer_write_prepare_count(void)
-{
-    return g_entry_count;
-}
-
-const composer_write_entry_t *
-composer_write_prepare_get(uint16_t index)
-{
-    if (index >= g_entry_count)
+    if (total_bars == 0)
         return 0;
 
-    return &g_entries[index];
+    for (uint16_t bar = 0; bar < total_bars; bar += COMPOSER_PATTERN_BARS)
+    {
+        if (g_block_count >= MAX_WRITE_BLOCKS)
+            break;
+
+        uint16_t block_idx = bar / COMPOSER_PATTERN_BARS;
+
+        composer_write_block_t *b = &g_blocks[g_block_count];
+        memset(b, 0, sizeof(*b));
+
+        b->slot      = slot_base + block_idx;
+        b->bar_start = bar;
+
+        /* Collect 4 bars → 64 steps */
+        for (uint16_t bi = 0; bi < COMPOSER_PATTERN_BARS; bi++)
+        {
+            uint16_t abs_bar = bar + bi;
+            if (abs_bar >= total_bars)
+                break;
+
+            for (uint16_t step = 0; step < COMPOSER_STEPS_PER_BAR; step++)
+            {
+                uint16_t dst =
+                    (bi * COMPOSER_STEPS_PER_BAR) + step;
+
+                /* Preview already wrote the pattern into RAM map,
+                   so we just read from current page = preview truth */
+                pattern_read_page(
+                    0, /* part is set later */
+                    &b->steps[dst],
+                    1,
+                    abs_bar
+                );
+
+                b->steps[dst].step = (uint8_t)dst;
+            }
+        }
+
+        g_block_count++;
+    }
+
+    return g_block_count;
+}
+
+int composer_write_get_block_count(void)
+{
+    return g_block_count;
+}
+
+const composer_write_block_t *composer_write_get_block(int idx)
+{
+    if (idx < 0 || idx >= g_block_count)
+        return NULL;
+    return &g_blocks[idx];
 }

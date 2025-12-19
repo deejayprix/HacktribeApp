@@ -2,39 +2,24 @@
 #define COMPOSER_WRITE_PREPARE_H
 
 #include <stdint.h>
-#include "composer.h"
+#include "ft_types.h"
+#include "composer_timeline.h"
 
-/* ============================================================
-   CONSTANTS
-   ============================================================ */
-
-#define COMPOSER_PATTERN_BARS      4
-#define COMPOSER_MAX_PATTERN_SLOTS 250
-
-/* ============================================================
-   WRITE PREPARED ENTRY
-   ============================================================ */
+#define COMPOSER_PATTERN_BARS   4
+#define COMPOSER_STEPS_PER_BAR 16
+#define COMPOSER_PATTERN_STEPS 64   /* 4 × 16 */
 
 typedef struct {
-    uint16_t slot;        /* 1..250 */
-    uint16_t bar_start;   /* timeline bar index */
-    composer_section_t section;
-    uint8_t  segment;    /* 0..3 (A/B/C/D) */
-} composer_write_entry_t;
+    uint16_t slot;              /* 1..250 */
+    uint16_t bar_start;         /* absolute bar */
+    ft_step_t steps[COMPOSER_PATTERN_STEPS];
+} composer_write_block_t;
 
-/* ============================================================
-   API
-   ============================================================ */
+/* Prepare all pattern blocks for writing */
+int composer_write_prepare(uint16_t slot_base);
 
-/* reset internal buffer */
-void composer_write_prepare_reset(void);
+/* Access prepared blocks */
+int composer_write_get_block_count(void);
+const composer_write_block_t *composer_write_get_block(int idx);
 
-/* build mapping from timeline */
-int composer_write_prepare_build(uint16_t first_slot);
-
-/* query results */
-uint16_t composer_write_prepare_count(void);
-const composer_write_entry_t *
-composer_write_prepare_get(uint16_t index);
-
-#endif /* COMPOSER_WRITE_PREPARE_H */
+#endif
